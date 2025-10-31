@@ -1,0 +1,10 @@
+numpy
+matplotlib
+pandas
+tqdm
+mplite
+seaborn
+PyQt5
+pympler
+scipy
+statannotations
