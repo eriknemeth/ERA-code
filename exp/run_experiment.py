@@ -4,7 +4,7 @@ from tqdm import tqdm
 import re
 from pympler.asizeof import asizeof
 
-def replay_stats(path: str, batches: list, norm_rep,
+def replay_stats(path: str, batches: list, norm_rep, restricted: bool, to_plot: str,
                    **kwargs) -> None:
     win_begin = kwargs.get('win_begin', 0)
     win_end = kwargs.get('win_end', None)
@@ -27,8 +27,9 @@ def replay_stats(path: str, batches: list, norm_rep,
                         starting = False
                     dTm.load_events(file, env_file, batch, path=curr_path)
     print('Computing stats...')
-    # dTm.DT_compare_left_right('content', batches, stat_path, label=label)
-    dTm.DT_plot_biases('content', batches, stat_path, label=label)
+    dTm.DT_compare_left_right(to_plot, batches, stat_path, label=label)
+    dTm.DT_plot_biases(to_plot, batches, stat_path, restricted=restricted, label=label,
+                       all_rew_locs=kwargs.get('all_rew_locs', False), lin_fit_window=kwargs.get('lin_fit_window', None))
 
 
 
@@ -94,11 +95,14 @@ def replay_plotter(path: str, batches: list, label: str, fig_shape: list, norm_r
     print('Plotting...')
     if not comp:
         # dTm.plot_replay('loc', batches, fig_shape, save_img=True, path=img_path, label=label,
-        #                 box_plot=kwargs.get('box', False))
+        #                 box_plot=kwargs.get('box', False), lims=kwargs.get('lims', None))
         # plt.close()
         dTm.plot_replay('content', batches, fig_shape, save_img=True, path=img_path, label=label,
                         box_plot=kwargs.get('box', False), lims=kwargs.get('lims', None))
         plt.close()
+        # dTm.plot_replay('stationed', batches, fig_shape, save_img=True, path=img_path, label=label,
+        #                 box_plot=kwargs.get('box', False), lims=kwargs.get('lims', None))
+        # plt.close()
     else:
         # dTm.plot_replay_comp('loc', batches, save_img=True, path=img_path, label=label, bar=kwargs.get('bar', False),
         #                      lims=kwargs.get('lims', None))
@@ -106,6 +110,9 @@ def replay_plotter(path: str, batches: list, label: str, fig_shape: list, norm_r
         dTm.plot_replay_comp('content', batches, save_img=True, path=img_path, label=label,
                              bar=kwargs.get('bar', False), lims=kwargs.get('lims', None))
         plt.close()
+        # dTm.plot_replay_comp('stationed', batches, save_img=True, path=img_path, label=label,
+        #                      bar=kwargs.get('bar', False), lims=kwargs.get('lims', None))
+        # plt.close()
 
 
 def cumulative_plotter_chunks(path: str, batch: str, label: str, fig_shape: list,
@@ -166,11 +173,13 @@ def experiment_plotter(path: str, env_file: str, agent_file: str, **kwargs):
     :param agent_file: name of the agent events file [.csv]
     :param kwargs:
         weights: weights to combine the Q, Ur and Ut values into C-values [np.ndarray]
+        save_path: where to save the plot image by image
     :return:
     """
     dTm = PlotterEnv(env_file, path=path)
     dTm.load_events(agent_file, env_file, 'MB', path=path)
-    dTm.plot_events(start=kwargs.get('start', 0))
+    dTm.plot_events(start=kwargs.get('start', 0), save_path=kwargs.get('save_path', None))
+    plt.close()
 
 
 def free_exploration(save_path: str, tag: str, dec_weights, **kwargs) -> None:
@@ -203,6 +212,15 @@ def free_exploration(save_path: str, tag: str, dec_weights, **kwargs) -> None:
     flickering = kwargs.get('flickering', False)
     epsilon = kwargs.get('epsilon', 0.05)
     free_DT_start_from = kwargs.get('free_DT_start_from', 'center')
+    wall_loc = kwargs.get('wall_loc', None)
+    wall_change = kwargs.get('wall_change', None)
+    new_wall_loc = kwargs.get('new_wall_loc', None)
+    num_visits_training = kwargs.get('num_visits_training', None)
+    state_of_interest = kwargs.get('state_of_interest', None)
+    action_of_interest = kwargs.get('action_of_interest', None)
+    num_runs = kwargs.get('num_runs', 200)
+
+
 
     # Creating a model
     params = dict()
@@ -244,10 +262,12 @@ def free_exploration(save_path: str, tag: str, dec_weights, **kwargs) -> None:
         else:
             params[
                 'episode_length'] = None  # --------------------------- 10 steps should be enough to reach the distal reward
-            params['rew_loc'] = np.array([19])  # --------------- What is (are) the rewarded state(s)
+            # params['rew_loc'] = np.array([19])  # --------------- What is (are) the rewarded state(s)
+            params['rew_loc'] = np.array([22])  # --------------- What is (are) the rewarded state(s)
             params['rew_val'] = np.array([1])  # ----------------- What is (are) the value(s) of the reward(s)
             params['rew_prob'] = np.array([1])  # ---------------- What is (area) the probability/ies of the reward(s)
-            params['new_rew_loc'] = np.array([21])  # ------------------ What is (are) the rewarded state(s)
+            # params['new_rew_loc'] = np.array([21])  # ------------------ What is (are) the rewarded state(s)
+            params['new_rew_loc'] = np.array([29])  # ------------------ What is (are) the rewarded state(s)
             params['new_rew_val'] = np.array([1])  # ------------------ What is (are) the value(s) of the reward(s)
             params['new_rew_prob'] = np.array([1])  # -- What is (area) the probability/ies of the reward(s)
     elif params['maze_type'] == 'M':
@@ -350,8 +370,18 @@ def free_exploration(save_path: str, tag: str, dec_weights, **kwargs) -> None:
         params['new_rew_loc'] = np.array([7])  # ------------------ What is (are) the rewarded state(s)
         params['new_rew_val'] = np.array([1])  # ------------------ What is (are) the value(s) of the reward(s)
         params['new_rew_prob'] = np.array([1])  # -- What is (area) the probability/ies of the reward(s)
+    elif params['maze_type'] == 'Tolman':
+        params['start_pos'] = 20  # ----------------------------- What state do we start from
+        params['rew_loc'] = np.array([0])  # --------------- What is (are) the rewarded state(s)
+        params['rew_val'] = np.array([1])  # ----------------- What is (are) the value(s) of the reward(s)
+        params['rew_prob'] = np.array([1])  # ---------------- What is (area) the probability/ies of the reward(s)
+        params['new_rew_loc'] = None  # ------------------ What is (are) the rewarded state(s)
+        params['new_rew_val'] = None  # ------------------ What is (are) the value(s) of the reward(s)
+        params['new_rew_prob'] = None  # -- What is (area) the probability/ies of the reward(s)
+        params[
+            'episode_length'] = 22  # ---------------------------- rr: 10, 12 or 16
 
-    params['num_runs'] = 200  # ---------------------------- How many epochs do we model
+    params['num_runs'] = num_runs  # ---------------------------- How many epochs do we model
     if rew_change is None:
         params['rew_change'] = rew_change
     else:
@@ -359,9 +389,13 @@ def free_exploration(save_path: str, tag: str, dec_weights, **kwargs) -> None:
             params['num_runs'] * rew_change)  # - When do we change the reward location (if we do)
     params['env_forbidden_walls'] = forbidden_walls  # ----------------- Is it forbidden to bump into walls?
     params['slip_prob'] = 0  # ------------------------------ The probability of slipping after a step
-    params['wall_loc'] = None  # ----------- The wall is between what states (before the change)
-    params['wall_change'] = None  # ------- When do we add a wall (if we do)
-    params['new_wall_loc'] = None  # ------------ The wall is between what states (after the change)
+    params['wall_loc'] = wall_loc  # ----------- The wall is between what states (before the change)
+    if wall_change is None:
+        params['wall_change'] = wall_change
+    else:
+        params['wall_change'] = math.ceil(
+                params['num_runs'] * wall_change)   # ------- When do we add a wall (if we do)
+    params['new_wall_loc'] = new_wall_loc  # ------------ The wall is between what states (after the change)
 
     # About the agent
     params[
@@ -382,10 +416,10 @@ def free_exploration(save_path: str, tag: str, dec_weights, **kwargs) -> None:
     elif params['decision_rule'] == 'softmax':
         params['beta'] = beta  # ------------------------------ Beta for softmax from Massi et al. (2022) MF-priority
     params['replay_type'] = replay_type  # ------------------ 'priority', 'trsam', 'bidir', 'backwards', 'forward'
-    params['replay_every_step'] = True
-    if params['replay_type'] in ['trsam', 'bidir']:
-        params['replay_every_step'] = False
-    if params['replay_type'] in ['priority', 'bidir']:
+    params['replay_every_step'] = False
+    if params['replay_type'] in ['trsam', 'itrsam']:
+        params['replay_every_step'] = True
+    if params['replay_type'] in ['priority']:
         params['event_handle'] = handle  # -------------------------- What is each new memory compared to [s, sa, sas]
     params['event_content'] = handle  # ------------------------ What is not estimated from model [s, sa, sas, sasr]
     params['replay_thresh'] = replay_threshold  # ----------- Smallest surprise necessary to initiate replay
@@ -397,8 +431,14 @@ def free_exploration(save_path: str, tag: str, dec_weights, **kwargs) -> None:
     params['rep_weigths'] = rep_weights  # ------------------ The weights used for replay [Q, Ur, Ut] float
     params['epist_rew_type'] = epist_rew_type  # ------------- The type of epistemic reward ["diff" or "abs"]
 
-    run_dT(**params)
     # shuffled_replay_test(**params)
+    params['num_visits_training'] = num_visits_training
+    params['state_of_interest'] = state_of_interest
+    params['action_of_interest'] = action_of_interest
+    if state_of_interest is None:
+        run_dT(**params)
+    else:
+        tolman_replay_test(**params)
 
 
 def shuffled_replay_test(rew_loc: np.ndarray, start_pos: int,
@@ -453,6 +493,7 @@ def shuffled_replay_test(rew_loc: np.ndarray, start_pos: int,
     # Arguments for the environment
     maze_type = kwargs.get('maze_type', "DT")
     env_forbidden_walls = kwargs.get('env_forbidden_walls', False)
+    restricted_dT = kwargs.get('restricted_dT', False)
     slip_prob = kwargs.get('slip_prob', 0)
     rew_val = kwargs.get('rew_val', np.ones(rew_loc.shape))
     rew_prob = kwargs.get('rew_prob', np.ones(rew_loc.shape))
@@ -488,7 +529,7 @@ def shuffled_replay_test(rew_loc: np.ndarray, start_pos: int,
     # 0) Creating the environment and the agent within
     dTm = None
     if maze_type == 'DT':
-        dTm = DTMaze(forbidden_walls=env_forbidden_walls, restricted_dT=False,
+        dTm = DTMaze(forbidden_walls=env_forbidden_walls, restricted_dT=restricted_dT,
                      slip_prob=slip_prob, start_pos=start_pos)
     elif maze_type == 'M':
         dTm = Mmaze(forbidden_walls=env_forbidden_walls,
@@ -513,7 +554,10 @@ def shuffled_replay_test(rew_loc: np.ndarray, start_pos: int,
         dTm = DTMazeWide(forbidden_walls=env_forbidden_walls,
                          slip_prob=slip_prob, start_pos=start_pos)
     elif maze_type == 'DTtight':
-        dTm = DTMazeTight(forbidden_walls=env_forbidden_walls, restricted_dT=False,
+        dTm = DTMazeTight(forbidden_walls=env_forbidden_walls, restricted_dT=restricted_dT,
+                          slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'Tolman':
+        dTm = TolmanMaze(forbidden_walls=env_forbidden_walls,
                           slip_prob=slip_prob, start_pos=start_pos)
 
     agent = RLagent(dTm, model_type, gamma, nV, decision_rule,
@@ -552,6 +596,199 @@ def shuffled_replay_test(rew_loc: np.ndarray, start_pos: int,
         if prog_bar:
             pbar.update(1)
     agent.memory_replay()
+
+    if save_data:
+        dTm.dump_env(path=save_path, label=save_tag)
+        agent.dump_agent(path=save_path, label=save_tag)
+
+def tolman_replay_test(rew_loc: np.ndarray, start_pos: int,
+                         model: str, model_type: str, gamma: float, nV: float, decision_rule: str,
+                         **kwargs):
+    """
+    Introduces the agent to all the states and actions shuffled randomly, and then records the first replay event
+    :param rew_loc: where the OG reward will be placed
+    :param start_pos: where the agent starts from
+    :param model: 'MF' or 'MB'
+    :param model_type: 'TD', 'VI' or 'PI'
+    :param gamma: discount factor
+    :param nV: The model is updated based on the last nV visits
+    :param decision_rule: 'max', 'epsilon' or 'softmax'
+    :param kwargs:
+        Environment-related variables:
+            env_forbidden_walls: can the agent choose to bump into a wall [bool]
+            restricted_dT: is the movement unidirectional or not [bool]
+            slip_prob: probability of slipping while moving [float]
+            rew_val: value of reward [float array]
+            rew_prob: proba of reward [float array]
+            wall_loc: Between what states will we have walls [array of 2D arrays of ints]
+        Agent-related variables:
+            known_env: is the state-space previously known [True] or not [False, default]
+            based on 'model':
+                alpha: learning parameter for the MF agent [float]
+            based on 'decision_rule':
+                epsilon: exploration constant of epsilon greedy agent [float]
+                beta: exploitation constant of softmax agent [float]
+            replay_type: 'forward', 'backward', 'priority', 'trsam', 'bidir' or None:
+                replay_every_step: do I replay after every step [True, default] or only after receiving a reward [False]
+                event_handle: what should we compare a new event to when trying to estimate if we need to
+                    overwrite an old memory or not: states ['s'], state-action ['sa'] or
+                    state-action-new state ['sas']. Only needed if replay_type is "priority" or "bidir"
+                event_content: what should we replay, states ['s'], state-action ['sa'],
+                    state-action-new state ['sas'], or state-action-new state-reward ['sasr', default].
+                replay_thresh: replay threshold [float]
+                max_replay: max number of replay steps [int]
+                add_predecessors: for priority and bidir, when do I add predecessors to the buffer ['act', 'rep',
+                    'both', None]
+                replay_forbidden_walls: is choosing a wall forbidden for replay [True] or not [False]
+            epist_rew_type: do epistemic rewards come from absolute uncertainty ["abs"] or changes in unc ["diff"]
+            dec_weight: weight of the different quality functions contributing to decisions [Q, Ur, Ut], float array
+            rep_weight: weight of the different quality functions contributing to replay [Q, Ur, Ut], float array
+        Storing-related variables:
+            prog_bar: should I show progress bar?
+            save_data: Should we save the data generated [True] or not [False, default]
+            save_path: Where should we save [str] (default: current folder)
+            save_tag: What tag should I add to the end of the filename [str, default: None]
+    :return:
+    """
+    # Arguments for the environment
+    maze_type = kwargs.get('maze_type', "DT")
+    env_forbidden_walls = kwargs.get('env_forbidden_walls', False)
+    restricted_dT = kwargs.get('restricted_dT', False)
+    slip_prob = kwargs.get('slip_prob', 0)
+    rew_val = kwargs.get('rew_val', np.ones(rew_loc.shape))
+    rew_prob = kwargs.get('rew_prob', np.ones(rew_loc.shape))
+    wall_loc = kwargs.get('wall_loc', np.array([[]]))
+    wall_change = kwargs.get('wall_change', None)
+    new_wall_loc = kwargs.get('new_wall_loc', np.array([[]]))
+    num_visits_training = kwargs.get('num_visits_training', None)
+    state_of_interest = kwargs.get('state_of_interest', None)
+    action_of_interest = kwargs.get('action_of_interest', None)
+    if state_of_interest is None or action_of_interest is None:
+        raise ValueError('For the single replay scenario it is essential that a state_of_interest and action_of_interest be specified.')
+    num_runs = kwargs.get('num_runs', 1)
+
+    # Arguments for the model
+    known_env = kwargs.get('known_env', False)
+    alpha, epsilon, beta, pre_training = None, None, None, None
+    if model == 'MF':
+        alpha = kwargs.get('alpha', None)
+    if decision_rule == 'epsilon':
+        epsilon = kwargs.get('epsilon', None)
+    elif decision_rule == 'softmax':
+        beta = kwargs.get('beta', None)
+    replay_type = kwargs.get('replay_type', None)
+    event_handle = kwargs.get('event_handle', None)
+    event_content = kwargs.get('event_content', 'sasr')
+    replay_thresh = kwargs.get('replay_thresh', None)
+    max_replay = kwargs.get('max_replay', None)
+    add_predecessors = kwargs.get('add_predecessors', None)
+    replay_forbidden_walls = kwargs.get('replay_forbidden_walls', True)
+    dec_weights = kwargs.get('dec_weights', np.array([0.75, 0.2, 0.05]))
+    rep_weights = kwargs.get('rep_weights', dec_weights)
+    epist_rew_type = kwargs.get('epist_rew_type', 'diff')
+
+    # Arguments about saving
+    prog_bar = kwargs.get('prog_bar', False)
+    save_data = kwargs.get('save_data', False)
+    save_path = kwargs.get('save_path', None)
+    save_tag = kwargs.get('save_tag', None)
+    save_format = kwargs.get('save_format', 'full')
+
+    # 0) Creating the environment and the agent within
+    dTm = None
+    if maze_type == 'DT':
+        dTm = DTMaze(forbidden_walls=env_forbidden_walls, restricted_dT=restricted_dT,
+                     slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'M':
+        dTm = Mmaze(forbidden_walls=env_forbidden_walls,
+                    slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'Open':
+        dTm = OpenMaze(kwargs.get('x_dim', None), kwargs.get('y_dim', None),
+                       forbidden_walls=env_forbidden_walls,
+                       slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'ED':
+        dTm = EDmaze(forbidden_walls=env_forbidden_walls,
+                     slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'Simple':
+        dTm = SimpleMaze(forbidden_walls=env_forbidden_walls,
+                         slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'Linear':
+        dTm = LinearMaze(forbidden_walls=env_forbidden_walls,
+                         slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'SED':
+        dTm = SmallEDmaze(forbidden_walls=env_forbidden_walls,
+                          slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'DTwide':
+        dTm = DTMazeWide(forbidden_walls=env_forbidden_walls,
+                         slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'DTtight':
+        dTm = DTMazeTight(forbidden_walls=env_forbidden_walls, restricted_dT=restricted_dT,
+                          slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'Tolman':
+        dTm = TolmanMaze(forbidden_walls=env_forbidden_walls,
+                          slip_prob=slip_prob, start_pos=start_pos)
+
+    agent = RLagent(dTm, model_type, gamma, nV, decision_rule,
+                    alpha=alpha, beta=beta, epsilon=epsilon, known_env=known_env,
+                    replay_type=replay_type, event_content=event_content, event_handle=event_handle,
+                    replay_thresh=replay_thresh, max_replay=max_replay,
+                    epist_rew_type=epist_rew_type, dec_weights=dec_weights, rep_weights=rep_weights,
+                    add_predecessors=add_predecessors, forbidden_walls=replay_forbidden_walls,
+                    format=save_format)
+
+    # 0) Placing down the walls
+    if wall_loc is not None:
+        for w_idx in range(wall_loc.shape[0]):
+            dTm.place_wall(wall_loc[w_idx, 0], wall_loc[w_idx, 1])
+
+    # 2) Preparing the experiment
+    for r_idx in range(len(rew_loc)):
+        dTm.place_reward(rew_loc[r_idx], rew_val[r_idx], rew_prob[r_idx])
+
+    # 3) Learning every single state and action in a randomized order
+    if num_visits_training is None:
+        num_visits_training = 1
+    all_states = np.array(range(dTm.state_num()))
+    if prog_bar:
+        print('Learning all states and actions...')
+        pbar = tqdm(total=num_visits_training)
+    for _ in range(num_visits_training):
+        np.random.shuffle(all_states)
+        for s in all_states:
+            dTm.place_agent(s)
+            a_poss = dTm.possible_moves(s)
+            np.random.shuffle(a_poss)
+            for a in a_poss:
+                s_prime, r = dTm.step(s, a)
+                hr, ht = agent.model_learning(s, a, s_prime, r)
+                delta_C = agent.inference(s, a, s_prime, np.array([r, hr, ht]))
+                if replay_thresh is not None and abs(delta_C) > replay_thresh:
+                    agent.memory_replay(s=s)
+        if prog_bar:
+            pbar.update(1)
+
+    # 4) Placing down the new walls
+    if wall_change is not None:
+        dTm.reset_wall()
+        for w_idx in range(new_wall_loc.shape[0]):
+            dTm.place_wall(new_wall_loc[w_idx, 0], new_wall_loc[w_idx, 1])
+
+    # 5) The actual replay event
+    if save_data:
+        dTm.toggle_save()
+        agent.toggle_save()
+
+    for _ in range(num_runs):
+        dTm.reset_agent()  # This indicates to the environment that we're starting a new trial
+        dTm.place_agent(state_of_interest)
+        a_poss = dTm.possible_moves(state_of_interest)
+        a = agent.choose_action(state_of_interest, a_poss)
+        a = action_of_interest
+        s_prime, r = dTm.step(state_of_interest, a)
+        hr, ht = agent.model_learning(state_of_interest, a, s_prime, r)  # The epistemic rewards
+        delta_C = agent.inference(state_of_interest, a, s_prime, np.array([r, hr, ht]))
+        if replay_thresh is not None and abs(delta_C) > replay_thresh:
+            agent.memory_replay(s=state_of_interest)
 
     if save_data:
         dTm.dump_env(path=save_path, label=save_tag)
@@ -694,6 +931,9 @@ def run_dT(rew_loc: np.ndarray, start_pos: int, episode_length: int, num_runs: i
     elif maze_type == 'DTtight':
         dTm = DTMazeTight(forbidden_walls=env_forbidden_walls, restricted_dT=restricted_dT,
                           slip_prob=slip_prob, start_pos=start_pos)
+    elif maze_type == 'Tolman':
+        dTm = TolmanMaze(forbidden_walls=env_forbidden_walls,
+                          slip_prob=slip_prob, start_pos=start_pos)
 
     agent = RLagent(dTm, model_type, gamma, nV, decision_rule,
                     alpha=alpha, beta=beta, epsilon=epsilon, known_env=known_env,
@@ -792,7 +1032,7 @@ def run_experiment(num_runs: int, episode_length, env: Env, agent: RLagent, **kw
         prog_bar: do I show a progress bar
         replay_thresh: what is the threshold to trigger replay (if None, no replay)
         pre_training: is this a pre-training setting [True -- no need to learn Q values] or not [False]
-        replay_every_step: do I replay after each step [True -- default] of only after getting a reward [False]
+        replay_every_step: do I replay after each step [True -- default] or only after a significant event [False]
         restricted: is it a restricted DT-maze [True] or not [False, default]
     :return:
     """
@@ -827,9 +1067,10 @@ def run_experiment(num_runs: int, episode_length, env: Env, agent: RLagent, **kw
             # 4) Learn
             hr, ht = agent.model_learning(s, a, s_prime, r)  # The epistemic rewards
             if not pre_training:
+                # print(f"\n\nStep taken: s={s}, a={a}, s'={s_prime}, r={r}")  ###########
                 delta_C = agent.inference(s, a, s_prime, np.array([r, hr, ht]))
-                if replay_thresh is not None and replay_every_step and abs(delta_C) > replay_thresh:
-                    agent.memory_replay(s=s)
+                if replay_every_step or (replay_thresh is not None and abs(delta_C) > replay_thresh):
+                    agent.memory_replay(s=s_prime)
 
             step += 1
 

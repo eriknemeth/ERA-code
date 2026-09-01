@@ -42,6 +42,7 @@ class PlotterEnv(Env):
         self._crossed = {}
         self._stopped_at = {}  # A dict of arrays (of the maze) where each state counts stoppings by the agent
         self._replayed = {}  # A dict of arrays (of the maze) where each state counts replays by the agent
+        self._stationed = {}  # A dict of arrays (of the maze) where each state counts the amount of time (in steps) spent by the agent while replaying
         # The following variables are structured as {batch_name: np.ndarray(t, repetition), ...}
         self._rew_rate = {}  # A dict of vectors containing the reward rate for each step/epoch
         self._replay_rate = {}  # A dict of vectors containing the replay rate for each step/epoch
@@ -75,6 +76,7 @@ class PlotterEnv(Env):
             self._replayed[batch] = np.zeros((self._maze.shape[0], self._maze.shape[1], 1))
             self._stopped_at[batch] = np.zeros((self._maze.shape[0], self._maze.shape[1], 1))
             self._crossed[batch] = np.zeros((self._maze.shape[0], self._maze.shape[1], 1))
+            self._stationed[batch] = np.zeros((self._maze.shape[0], self._maze.shape[1], 1))
         else:
             # If it is a pre-existing batch, let's simply extend it
             self._replayed[batch] = np.append(self._replayed[batch],
@@ -84,6 +86,9 @@ class PlotterEnv(Env):
                                                 np.zeros((self._maze.shape[0], self._maze.shape[1], 1)),
                                                 axis=2)
             self._crossed[batch] = np.append(self._crossed[batch],
+                                             np.zeros((self._maze.shape[0], self._maze.shape[1], 1)),
+                                             axis=2)
+            self._stationed[batch] = np.append(self._stationed[batch],
                                              np.zeros((self._maze.shape[0], self._maze.shape[1], 1)),
                                              axis=2)
 
@@ -97,8 +102,13 @@ class PlotterEnv(Env):
         #     visited = np.zeros((self._maze.shape[0], self._maze.shape[1]))
 
         # Loop through the whole table
+        last_x, last_y = None, None  # The coordinates of the last real step
         for row_idx in agent_events.index:
             if agent_events['step'][row_idx] > 0:  # If we have a replay event
+                # We update the time spent in a given state
+                if last_x is not None and last_y is not None:
+                    self._stationed[batch][last_x, last_y, -1] += 1
+
                 # We update the replayed states
                 x, y = self.__find_state_coord__(row_idx, 's')
                 self._replayed[batch][x, y, -1] += 1
@@ -112,14 +122,15 @@ class PlotterEnv(Env):
             else:
                 # This is a real step, so we have to count the visit for normalization purposes
                 # if self._norm_rep == 'visits':
-                x, y = self.__find_state_coord__(row_idx, 's_prime')
-                self._crossed[batch][x, y, -1] += 1
+                last_x, last_y = self.__find_state_coord__(row_idx, 's_prime')
+                self._crossed[batch][last_x, last_y, -1] += 1
 
         # Finally we normalize
         if self._norm_rep is not None:
             sum_of_steps = (agent_events['step'] > 0).to_numpy().sum()
             if sum_of_steps > 0:
                 self._replayed[batch][:, :, -1] /= sum_of_steps
+                self._stationed[batch][:, :, -1] /= sum_of_steps
             if self._norm_rep == 'total':
                 sum_of_replay = (agent_events['step'] == 1).to_numpy().sum()
                 if sum_of_replay > 0:
@@ -297,7 +308,7 @@ class PlotterEnv(Env):
             win_end = agent_events['ep'].iloc[-1]
         elif win_end < 0:
             win_end = agent_events['ep'].iloc[-1] + win_end
-        return agent_events.loc[(agent_events['ep'] >= win_begin) & (agent_events['ep'] < win_end), :]
+        return agent_events.loc[(agent_events['ep'] >= win_begin) & (agent_events['ep'] <= win_end), :]
 
     def __compute_U_dynamics(self, batch: str) -> None:
         """
@@ -310,6 +321,9 @@ class PlotterEnv(Env):
         agent_events = agent_events[agent_events['step'] == 0]
         # self._agent_events.reset_index(drop=True, inplace=True)
         agent_events = self.__cut_window__(agent_events)
+        if agent_events.empty:
+            return
+
         Ur_vals = self.__find_max_vals__(agent_events, 'Ur')
         Ut_vals = self.__find_max_vals__(agent_events, 'Ut')
 
@@ -357,8 +371,9 @@ class PlotterEnv(Env):
         agent_events.loc[agent_events['step'] > 0, 'r'] = 0
         agent_events = self.__cut_window__(agent_events)
 
-        self.__epoch_based_rate_computer__(self._rew_rate, batch, agent_events)
-        self.__epoch_based_rate_computer__(self._replay_rate, batch, agent_events, rate='replay')
+        if not agent_events.empty:
+            self.__epoch_based_rate_computer__(self._rew_rate, batch, agent_events)
+            self.__epoch_based_rate_computer__(self._replay_rate, batch, agent_events, rate='replay')
         return
 
     def __compute_cumul_rew__(self, batch: str) -> None:
@@ -551,6 +566,7 @@ class PlotterEnv(Env):
         elif win_end < 0:
             win_end = self._events['ep'].iloc[-1] + win_end
         begin_idx = np.where(self._events['ep'] == win_begin + 1)[0][0]
+        # end_idx = np.where(self._events['ep'] == win_end - 1)[0][0]
         end_idx = np.where(self._events['ep'] == win_end - 1)[0][0]
 
         # Creating the POI
@@ -686,7 +702,7 @@ class PlotterEnv(Env):
             win_end = self._events['ep'].iloc[-1]
         elif win_end < 0:
             win_end = self._events['ep'].iloc[-1] + win_end
-        t = range(win_begin, win_end)
+        t = range(win_begin, win_end+1)
         header = pd.MultiIndex.from_product([batches, [f'{idx}' for idx in range(data[batches[0]].shape[1])]],
                                             names=['batch', 'run'])
         df = pd.DataFrame(rr, index=t, columns=header)
@@ -750,8 +766,13 @@ class PlotterEnv(Env):
         replay and the Q values, the other one for the Ur and the Ut values.
         :kwargs:
             start: the epoch/step number to start from
+            save_path: where I want to save the plot image-by-image
         :return:
         """
+        save_path = kwargs.get('save_path', None)
+        if save_path is not None and not os.path.isdir(save_path):
+            os.mkdir(save_path)
+
         start = kwargs.get('start', 0)
         if start < 0 or start > max(self._events['ep']):
             raise ValueError('Start has to be between 0 and the number of steps/epochs')
@@ -809,7 +830,7 @@ class PlotterEnv(Env):
         curr_Ut = self.__event_to_img__(Ut_vals.iloc[start])
         axim_rla = np.array([ax_rla[0].imshow(curr_Q, vmin=0, vmax=max_vals[0]),
                              ax_rla[1].imshow(curr_Ur, vmin=0, vmax=max_vals[1]),
-                             ax_rla[2].imshow(curr_Ut, vmin=0, vmax=max_vals[2])])
+                             ax_rla[2].imshow(curr_Ut, vmin=0, vmax=1)])
         # For negative values:
         # axim_rla = np.array([ax_rla[0].imshow(curr_Q, vmin=-max_vals[0], vmax=max_vals[0]),
         #                      ax_rla[1].imshow(curr_Ur, vmin=-max_vals[1], vmax=max_vals[1]),
@@ -827,6 +848,9 @@ class PlotterEnv(Env):
                 txt[idx_x, idx_y, 3] = ax_rla[2].text(idx_y, idx_x, f"{curr_Ut[idx_x, idx_y]: .1f}",
                                                       ha="center", va="center", color="w")
         plt.show()
+        if save_path is not None:
+            fig_env.savefig(f'{save_path}/env_{start}_{self._agent_events["iter"].iloc[start]}_maxed.svg', format="svg", bbox_inches="tight")
+            fig_rla.savefig(f'{save_path}/rla_{start}_{self._agent_events["iter"].iloc[start]}_maxed.svg', format="svg", bbox_inches="tight")
 
         # And the R values #############################################################################################
         # R_vals = self.__find_max_vals__('R')
@@ -945,6 +969,12 @@ class PlotterEnv(Env):
             fig_env.canvas.flush_events()
             fig_rla.canvas.flush_events()
             plt.show()
+            if save_path is not None and \
+                (row_idx+1 == self._agent_events.shape[0] or \
+                it < int(self._agent_events['iter'].iloc[row_idx + 1])):
+                # We save if this is the end of a replay step OR if this is the end of the file
+                fig_env.savefig(f'{save_path}/env_{row_idx}_{it}.svg', format="svg", bbox_inches="tight")
+                fig_rla.savefig(f'{save_path}/rla_{row_idx}_{it}.svg', format="svg", bbox_inches="tight")
             # plt.pause(.001)
 
             # And for the R values #####################################################################################
@@ -980,6 +1010,7 @@ class PlotterEnv(Env):
             # # axim_rew[2].set_clim(vmin=-max_vals_R[2], vmax=max_vals_R[2])
             # fig_rew.canvas.flush_events()
             ############################################################################################################
+        plt.close('all')
 
     def plot_U_dynamics(self, batches: list, **kwargs) -> None:
         """
@@ -1015,7 +1046,7 @@ class PlotterEnv(Env):
             if not os.path.isdir(path):
                 os.mkdir(path)
             label = kwargs.get('label', '')
-            plt.savefig(f'{path}U_dynamics_{label}.pdf', format="pdf", bbox_inches="tight")
+            plt.savefig(f'{path}U_dynamics_{label}.svg', format="svg", bbox_inches="tight")
 
     def plot_reward_rates(self, batches: list, **kwargs) -> None:
         """
@@ -1050,7 +1081,7 @@ class PlotterEnv(Env):
             if not os.path.isdir(path):
                 os.mkdir(path)
             label = kwargs.get('label', '')
-            plt.savefig(f'{path}rew_rate_{label}.pdf', format="pdf", bbox_inches="tight")
+            plt.savefig(f'{path}rew_rate_{label}.svg', format="svg", bbox_inches="tight")
 
     def plot_replay_comp(self, to_plot: str, batches: list, **kwargs) -> None:
         """
@@ -1067,12 +1098,14 @@ class PlotterEnv(Env):
         """
         if len(batches) != 2:
             raise ValueError("One can only compare 2 batches at a time.")
-        if to_plot not in ['loc', 'content']:
-            raise ValueError('to_plot has to be either "loc" or "content"')
+        if to_plot not in ['loc', 'content', 'stationed']:
+            raise ValueError('to_plot has to be either "loc", "content" or "stationed"')
         if to_plot == 'loc':
             title = 'Stopped to replay at'
-        else:
+        elif to_plot == 'content':
             title = 'Replayed'
+        elif to_plot == 'stationed':
+            title = 'Stationed at'
         bar = kwargs.get('bar', False)
         if self._win_begin is not None or self._win_end is not None:
             beg = self._win_begin
@@ -1116,6 +1149,21 @@ class PlotterEnv(Env):
                     df_1 = self.__cut_up_DTmaze__(pd.DataFrame(self._replayed[batches[0]][:, :, rep]))
                     df_1['batch'] = [batches[0]] * len(df_1)
                     df_2 = self.__cut_up_DTmaze__(pd.DataFrame(self._replayed[batches[-1]][:, :, rep]))
+                    df_2['batch'] = [batches[-1]] * len(df_2)
+                    df = pd.concat([df, df_1, df_2],
+                                   ignore_index=True)
+        elif to_plot == 'stationed':
+            if not bar:
+                df = pd.DataFrame(self.__mask_walls__(np.mean(self._stationed[batches[-1]], axis=2))) - \
+                     pd.DataFrame(self.__mask_walls__(np.mean(self._stationed[batches[0]], axis=2)))
+                lab = 'expected replay'
+                if self._norm_rep:
+                    lab = 'likelihood of replay'
+            else:
+                for rep in range(self._stationed[batches[0]].shape[2]):
+                    df_1 = self.__cut_up_DTmaze__(pd.DataFrame(self._stationed[batches[0]][:, :, rep]))
+                    df_1['batch'] = [batches[0]] * len(df_1)
+                    df_2 = self.__cut_up_DTmaze__(pd.DataFrame(self._stationed[batches[-1]][:, :, rep]))
                     df_2['batch'] = [batches[-1]] * len(df_2)
                     df = pd.concat([df, df_1, df_2],
                                    ignore_index=True)
@@ -1186,9 +1234,9 @@ class PlotterEnv(Env):
                 os.mkdir(path)
             label = kwargs.get('label', '')
             if not bar:
-                plt.savefig(f'{path}comp_rep_{to_plot}_{label}.pdf', format="pdf", bbox_inches="tight")
+                plt.savefig(f'{path}comp_rep_{to_plot}_{label}.svg', format="svg", bbox_inches="tight")
             else:
-                plt.savefig(f'{path}comp_rep_bar_{to_plot}_{label}.pdf', format="pdf", bbox_inches="tight")
+                plt.savefig(f'{path}comp_rep_bar_{to_plot}_{label}.svg', format="svg", bbox_inches="tight")
 
     def plot_replay(self, to_plot: str, batches: list, shape: list, **kwargs) -> None:
         """
@@ -1204,12 +1252,14 @@ class PlotterEnv(Env):
             lims: [vmin, vmax]
         :return:
         """
-        if to_plot not in ['loc', 'content']:
+        if to_plot not in ['loc', 'content', 'stationed']:
             raise ValueError('to_plot has to be either "loc" or "content"')
         if to_plot == 'loc':
             title = 'Stopped to replay at'
-        else:
+        elif to_plot == 'content':
             title = 'Replayed'
+        elif to_plot == 'stationed':
+            title = 'Stationed at'
         if self._win_begin is not None or self._win_end is not None:
             beg = self._win_begin
             if self._win_begin < 0:
@@ -1258,6 +1308,19 @@ class PlotterEnv(Env):
                                                        pd.DataFrame(
                                                            self._replayed[batches[batch_idx]][:, :, rep]))],
                                                   ignore_index=True)
+            elif to_plot == 'stationed':
+                if not kwargs.get('box_plot', False):
+                    df[batch_idx] = pd.DataFrame(self.__mask_walls__(np.mean(self._stationed[batches[batch_idx]], axis=2)))
+                    lab = 'expected time spent replaying'
+                    if self._norm_rep:
+                        lab = 'normalized time spent replaying'
+                else:
+                    for rep in range(self._stationed[batches[batch_idx]].shape[2]):
+                        df[batch_idx] = pd.concat([df[batch_idx],
+                                                   self.__cut_up_DTmaze__(
+                                                       pd.DataFrame(
+                                                           self._stationed[batches[batch_idx]][:, :, rep]))],
+                                                  ignore_index=True)
 
             # For normalization purposes
             lims = kwargs.get('lims', None)
@@ -1293,8 +1356,15 @@ class PlotterEnv(Env):
                 sns.heatmap(df[batch_idx], ax=axes[idx_x, idx_y], vmin=vmin, vmax=vmax, cbar_kws={'label': lab}, cmap='viridis')
             else:
                 palette = [plt.get_cmap('viridis')(i) for i in np.linspace(0, 1, df[batch_idx]['poi'].nunique())]
-                sns.boxplot(df[batch_idx], ax=axes[idx_x, idx_y], x='poi', y='rep', hue='poi', palette=palette)
+                sns.boxplot(df[batch_idx], ax=axes[idx_x, idx_y], x='poi', y='rep', hue='poi', palette=palette,
+                            order=['left_side', 'central_arm', 'right_side', 'reward', 'dec_point'])
                 axes[idx_x, idx_y].set(ylim=(vmin, vmax))
+                pairs = [('left_side', 'central_arm'), ('left_side', 'right_side'), ('central_arm', 'right_side'),
+                         ('reward', 'dec_point')]
+                annotator = Annotator(axes[idx_x, idx_y], pairs, data=df[batch_idx], x='poi', y='rep', hue='poi',
+                                      order=['left_side', 'central_arm', 'right_side', 'reward', 'dec_point'])
+                annotator.configure(test='Mann-Whitney', text_format='full', loc='inside')
+                annotator.apply_and_annotate()
 
         plt.show(block=False)
 
@@ -1305,7 +1375,7 @@ class PlotterEnv(Env):
             if not os.path.isdir(path):
                 os.mkdir(path)
             label = kwargs.get('label', '')
-            plt.savefig(f'{path}rep_{to_plot}_{label}.pdf', format="pdf", bbox_inches="tight")
+            plt.savefig(f'{path}rep_{to_plot}_{label}.svg', format="svg", bbox_inches="tight")
 
     def plot_rep_vs_visits(self, batches: list, **kwargs) -> None:
         """
@@ -1389,7 +1459,7 @@ class PlotterEnv(Env):
             label = kwargs.get('label', '')
             if label != '':
                 label = '_' + label
-            plt.savefig(f'{path}rep_vs_visits{label}.pdf', format="pdf", bbox_inches="tight")
+            plt.savefig(f'{path}rep_vs_visits{label}.svg', format="svg", bbox_inches="tight")
 
         plt.close()
 
@@ -1418,7 +1488,7 @@ class PlotterEnv(Env):
             label = kwargs.get('label', '')
             if label != '':
                 label = '_' + label
-            plt.savefig(f'{path}rep_vs_visits_full{label}.pdf', format="pdf", bbox_inches="tight")
+            plt.savefig(f'{path}rep_vs_visits_full{label}.svg', format="svg", bbox_inches="tight")
 
         plt.close()
 
@@ -1433,7 +1503,13 @@ class PlotterEnv(Env):
                                [1, 0, 0, 0, 0, 0, 0, 0],
                                [1, 0, 0, 0, 0, 0, 0, 0],
                                [1, 1, 1, 0, 0, 0, 0, 0]], dtype='bool')
-        return list(data[left_corridor])
+        # left_corridor = np.array([[1, 1, 1, 1, 1, 0, 0, 0],
+        #                        [1, 0, 0, 0, 1, 0, 0, 0],
+        #                        [1, 0, 0, 1, 1, 0, 0, 0],
+        #                        [1, 0, 0, 1, 0, 0, 0, 0],
+        #                        [0, 0, 0, 1, 0, 0, 0, 0],
+        #                        [1, 1, 1, 1, 0, 0, 0, 0]], dtype='bool')
+        return [list(data[left_corridor]), list(self._maze[left_corridor])]
 
     def __DT_right_corridor__(self, data: np.ndarray) -> list:
         """
@@ -1445,21 +1521,42 @@ class PlotterEnv(Env):
                                [0, 0, 0, 0, 0, 0, 0, 1],
                                [0, 0, 0, 0, 0, 0, 0, 1],
                                [0, 0, 0, 0, 1, 1, 1, 1]], dtype='bool')
-        return list(data[right_corridor])
+        # right_corridor = np.array([[0, 0, 0, 0, 1, 1, 1, 1],
+        #                        [0, 0, 0, 0, 1, 0, 0, 1],
+        #                        [0, 0, 0, 1, 1, 0, 0, 1],
+        #                        [0, 0, 0, 1, 0, 0, 0, 1],
+        #                        [0, 0, 0, 1, 0, 0, 0, 0],
+        #                        [0, 0, 0, 1, 1, 1, 1, 1]], dtype='bool')
+        return [list(data[right_corridor]), list(self._maze[right_corridor])]
+
+    def __DT_branching_points__(self, data: np.ndarray) -> list:
+        """
+        Returns the elements of the branching points in the DT-maze
+        """
+        branching_points = np.array([[0, 0, 0, 0, 1, 0, 0, 0],
+                               [0, 0, 0, 0, 0, 0, 0, 0],
+                               [0, 0, 0, 1, 0, 0, 0, 0],
+                               [0, 0, 0, 0, 0, 0, 0, 0],
+                               [0, 0, 0, 0, 0, 0, 0, 0],
+                               [0, 0, 0, 1, 0, 0, 0, 0]], dtype='bool')
+        return [list(data[branching_points]), list(self._maze[branching_points]), list(data[np.invert(branching_points)]), list(self._maze[np.invert(branching_points)])]
 
     def DT_compare_left_right(self, to_comp: str, batches: list, save_path: str, **kwargs):
         """
         The goal of this function is to compare the mean replay between 2 pre-defined regions in the maze
         """
         data = None
-        if to_comp not in ['loc', 'content']:
+        if to_comp not in ['loc', 'content', 'stationed']:
             raise ValueError('to_plot has to be either "loc" or "content"')
         if to_comp == 'loc':
             data_type = 'pauses'
             data = self._stopped_at
-        else:
+        elif to_comp == 'content':
             data_type = 'replay steps'
             data = self._replayed
+        elif to_comp == 'stationed':
+            data_type = 'stationed'
+            data = self._stationed
         if self._win_begin is not None or self._win_end is not None:
             beg = self._win_begin
             if self._win_begin < 0:
@@ -1483,58 +1580,155 @@ class PlotterEnv(Env):
             label = f'_{label}'
 
         # Here we will do the statistics individually for each and every batch
-        df_diff = pd.DataFrame(columns=['w', 'diff'])
-        with open(f'{save_path}statsLeftRight{label}.txt', 'w') as txt_file:
-            print(f'Comparing {data_type} between {beg} and {end}:\n', file=txt_file)
-            for batch_idx in range(len(batches)):
-                print(f'\tBatch {batches[batch_idx]}:\n', file=txt_file)
-                df = pd.DataFrame(columns=['left', 'right'])
-                data_batch = data[batches[batch_idx]]
-                for ep_idx in range(data_batch.shape[2]):
-                    left = self.__DT_left_corridor__(data_batch[:, :, ep_idx])
-                    right = self.__DT_right_corridor__(data_batch[:, :, ep_idx])
-                    df_temp = pd.DataFrame({'left': left, 'right': right})
-                    df = (df_temp.copy() if df.empty else pd.concat([df, df_temp], axis=0, ignore_index=True, sort=False))
-                    means = df_temp.mean()
-                    diff_temp = pd.DataFrame({'w': [float(batches[batch_idx][batches[batch_idx].find('_')+1:])],
-                                               'diff': [abs(means['left']-means['right'])]})
-                    df_diff = (diff_temp.copy() if df_diff.empty else pd.concat([df_diff, diff_temp], axis=0, ignore_index=True, sort=False))
-                stats = scipy.stats.ranksums(df['left'], df['right'])
-                print(f'\t\tLeft vs Right (Wilcoxon rank sum): \tp = {stats[1]}\tstat = {stats[0]}\n\n', file=txt_file)
+        # df_diff = pd.DataFrame(columns=['w', 'diff'])
+        df_full = pd.DataFrame(columns=['batch', 'side', 'states', 'replay'])
+        df_branching = pd.DataFrame(columns=['batch', 'type', 'states', 'replay'])
+        # with open(f'{save_path}statsLeftRight{label}.txt', 'w') as txt_file:
+        #     print(f'Comparing {data_type} between {beg} and {end}:\n', file=txt_file)
+        for batch_idx in range(len(batches)):
+            # print(f'\tBatch {batches[batch_idx]}:\n', file=txt_file)
+            batch_name = batches[batch_idx]
+            # df = pd.DataFrame(columns=['left', 'right'])
+            data_batch = data[batch_name]
+            for ep_idx in range(data_batch.shape[2]):
+                [left, left_states] = self.__DT_left_corridor__(data_batch[:, :, ep_idx])
+                [right, right_states] = self.__DT_right_corridor__(data_batch[:, :, ep_idx])
+                # df_temp = pd.DataFrame({'left': left, 'right': right})
+                # df = (df_temp.copy() if df.empty else pd.concat([df, df_temp], axis=0, ignore_index=True, sort=False))
+                # means = df_temp.mean()
+                # diff_temp = pd.DataFrame({'w': [float(batches[batch_idx][batches[batch_idx].find('_')+1:])],
+                #                            'diff': [means['left']-means['right']]})
+                # df_diff = (diff_temp.copy() if df_diff.empty else pd.concat([df_diff, diff_temp], axis=0, ignore_index=True, sort=False))
+                df_temp_left = pd.DataFrame({'batch': [batch_name]*len(left), 'side': ['left']*len(left), 'states': left_states, 'replay': left})
+                df_temp_right = pd.DataFrame({'batch': [batch_name] * len(right), 'side': ['right'] * len(right), 'states': right_states, 'replay': right})
+                df_full = pd.concat([df_temp_left, df_temp_right], axis=0, ignore_index=True, sort=False) \
+                    if df_full.empty else \
+                    pd.concat([df_full, df_temp_left, df_temp_right], axis=0, ignore_index=True, sort=False)
+
+                [bp, bp_states, nbp, nbp_states] = self.__DT_branching_points__(data_batch[:, :, ep_idx])
+                df_temp_bp = pd.DataFrame(
+                    {'batch': [batch_name] * len(bp), 'type': ['branching'] * len(bp), 'states': bp_states,
+                     'replay': bp})
+                df_temp_nbp = pd.DataFrame(
+                    {'batch': [batch_name] * len(nbp), 'type': ['normal'] * len(nbp), 'states': nbp_states,
+                     'replay': nbp})
+                df_branching = pd.concat([df_temp_bp, df_temp_nbp], axis=0, ignore_index=True, sort=False) \
+                    if df_branching.empty else \
+                    pd.concat([df_branching, df_temp_bp, df_temp_nbp], axis=0, ignore_index=True, sort=False)
+            # stats = scipy.stats.ranksums(df['left'], df['right'])
+            # print(f'\t\tLeft vs Right (Wilcoxon rank sum): \tp = {stats[1]}\tstat = {stats[0]}\n\n', file=txt_file)
 
         # Fitting a linear to the differences and plotting it
-        plt.figure()
-        sns.regplot(data=df_diff, x='w', y='diff', order=1, lowess=False, scatter=False)
-        sns.boxplot(data=df_diff, x='w', y='diff', width = 0.5)
-        res = linregress(df_diff['w'], df_diff['diff'])
-        slope = res.slope
-        pval = res.pvalue
-        ax = plt.gca()
-        plt.text(
-            0.95, 0.85,
-            f"slope = {slope:.2f}\np = {pval:.5f}",
-            transform=ax.transAxes,
-            ha='right',
-            va='bottom',
-            fontsize=10,
-            bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.6)
-        )
+        # plt.figure()
+        # sns.regplot(data=df_diff, x='w', y='diff', order=1, lowess=False, scatter=False)
+        # sns.boxplot(data=df_diff, x='w', y='diff', width = 0.5)
+        # res = linregress(df_diff['w'], df_diff['diff'])
+        # slope = res.slope
+        # pval = res.pvalue
+        # ax = plt.gca()
+        # plt.text(
+        #     0.95, 0.85,
+        #     f"slope = {slope:.2f}\np = {pval:.5f}",
+        #     transform=ax.transAxes,
+        #     ha='right',
+        #     va='bottom',
+        #     fontsize=10,
+        #     bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.6)
+        # )
+        #
+        # plt.show(block=False)
+        # plt.savefig(f'{save_path}diff_means{label}.svg', format="svg", bbox_inches="tight")
+        #
+        # plt.figure()
+        # df_diff_comp = df_diff[df_diff['w'].isin([0, 10])]
+        # sns.boxplot(data=df_diff_comp, x='w', y='diff', width=0.5)
+        # ax = plt.gca()
+        # annotator = Annotator(ax, [(0, 10)], data=df_diff_comp, x='w', y='diff')
+        # annotator.configure(test='Mann-Whitney', text_format='full', loc='inside')
+        # annotator.apply_and_annotate()
+        #
+        # plt.show(block=False)
+        # plt.savefig(f'{save_path}diff_means_zoomed{label}.svg', format="svg", bbox_inches="tight")
+
+        df_full_means = df_full.groupby(by=['batch', 'side', 'states']).mean().reset_index()
+        viridis = plt.get_cmap('viridis')
+        hue_levels = df_full_means['batch'].unique()
+        colors = [viridis(i) for i in np.linspace(0, 1, len(hue_levels))]
+        palette = dict(zip(hue_levels, colors))
+        g = sns.FacetGrid(df_full_means, col='batch', hue='batch', palette=palette, col_wrap=3)
+        # g.map(sns.regplot, 'distance', data_type, order=1, lowess=False, scatter=False)
+        g.map(sns.boxplot, 'side', 'replay', width=0.5, order=['left', 'right'])
+        for batch_idx in range(len(batches)):
+            ax = g.axes.flat[batch_idx]
+            batch_name = ax.get_title()
+            batch_name = batch_name[batch_name.find(' = ')+3:]
+            df_full_temp = df_full_means[df_full_means['batch'] == batch_name]
+            annotator = Annotator(ax, [('left', 'right')], data=df_full_temp, x='side', y='replay',
+                                  order=['left', 'right'])
+            annotator.configure(test='Mann-Whitney', text_format='full', loc='inside')
+            annotator.apply_and_annotate()
 
         plt.show(block=False)
-        plt.savefig(f'{save_path}diff_means{label}.pdf', format="pdf", bbox_inches="tight")
+        plt.savefig(f'{save_path}replay_left_vs_right_box{label}.svg', format="svg", bbox_inches="tight")
+        plt.close()
 
-        plt.figure()
-        df_diff_comp = df_diff[df_diff['w'].isin([0, 10])]
-        sns.boxplot(data=df_diff_comp, x='w', y='diff', width=0.5)
-        ax = plt.gca()
-        annotator = Annotator(ax, [(0, 10)], data=df_diff_comp, x='w', y='diff')
-        annotator.configure(test='Mann-Whitney', text_format='full', loc='inside')
-        annotator.apply_and_annotate()
+        df_branching_means = df_branching.groupby(by=['batch', 'type', 'states']).mean().reset_index()
+        g = sns.FacetGrid(df_branching_means, col='batch', hue='batch', palette=palette, col_wrap=3)
+        # g.map(sns.regplot, 'distance', data_type, order=1, lowess=False, scatter=False)
+        g.map(sns.boxplot, 'type', 'replay', width=0.5, order=['normal', 'branching'])
+        for batch_idx in range(len(batches)):
+            ax = g.axes.flat[batch_idx]
+            batch_name = ax.get_title()
+            batch_name = batch_name[batch_name.find(' = ') + 3:]
+            df_branching_temp = df_branching_means[df_branching_means['batch'] == batch_name]
+            annotator = Annotator(ax, [('normal', 'branching')], data=df_branching_temp, x='type', y='replay',
+                                  order=['normal', 'branching'])
+            annotator.configure(test='Mann-Whitney', text_format='full', loc='inside')
+            annotator.apply_and_annotate()
 
         plt.show(block=False)
-        plt.savefig(f'{save_path}diff_means_zoomed{label}.pdf', format="pdf", bbox_inches="tight")
+        plt.savefig(f'{save_path}replay_branching_box{label}.svg', format="svg", bbox_inches="tight")
+        plt.close()
 
-    def __compute_distances__(self, start: tuple[int, int]) -> np.ndarray:
+    def __get_DT_reverse_movement__(self, r: int, c: int, restricted: bool) -> list:
+        neighbors = []
+        rows, cols = self._maze.shape
+        if not restricted:
+            # 4-neighborhood directions (up, down, left, right)
+            directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            for dr, dc in directions:
+                nr, nc = r + dr, c + dc
+                if (0 <= nr < rows and 0 <= nc < cols  # inside grid
+                        and self._maze[nr, nc] != -1):  # not a wall
+                    neighbors.append((nr, nc))
+        else:
+            up = [22, 19, 16, 11, 8, 29, 21, 18, 15, 10]
+            down = [4, 9, 13, 17, 20]
+            left = [25, 24, 23, 7, 6, 5, 13, 14]
+            right = [0, 1, 2, 3, 25, 26, 27, 28, 12]
+            if self._maze[r, c] in up:
+                nr, nc = r - 1, c + 0
+                if (0 <= nr < rows and 0 <= nc < cols  # inside grid
+                        and self._maze[nr, nc] != -1):  # not a wall
+                    neighbors.append((nr, nc))
+            if self._maze[r, c] in down:
+                nr, nc = r + 1, c + 0
+                if (0 <= nr < rows and 0 <= nc < cols  # inside grid
+                        and self._maze[nr, nc] != -1):  # not a wall
+                    neighbors.append((nr, nc))
+            if self._maze[r, c] in left:
+                nr, nc = r + 0, c - 1
+                if (0 <= nr < rows and 0 <= nc < cols  # inside grid
+                        and self._maze[nr, nc] != -1):  # not a wall
+                    neighbors.append((nr, nc))
+            if self._maze[r, c] in right:
+                nr, nc = r + 0, c + 1
+                if (0 <= nr < rows and 0 <= nc < cols  # inside grid
+                        and self._maze[nr, nc] != -1):  # not a wall
+                    neighbors.append((nr, nc))
+        return neighbors
+
+    def __compute_distances__(self, start: tuple[int, int], restricted: bool) -> np.ndarray:
         rows, cols = self._maze.shape
         distances = np.full((rows, cols), np.inf)  # default: unreachable
         visited = np.zeros((rows, cols), dtype=bool)
@@ -1548,18 +1742,14 @@ class PlotterEnv(Env):
         distances[start] = 0
         visited[start] = True
 
-        # 4-neighborhood directions (up, down, left, right)
-        directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+
 
         while q:
             r, c, d = q.popleft()
 
-            for dr, dc in directions:
-                nr, nc = r + dr, c + dc
+            for nr, nc in self.__get_DT_reverse_movement__(r, c, restricted):
 
-                if (0 <= nr < rows and 0 <= nc < cols  # inside grid
-                        and not visited[nr, nc]  # not visited
-                        and self._maze[nr, nc] != -1):  # not a wall
+                if not visited[nr, nc]: # not visited
 
                     visited[nr, nc] = True
                     distances[nr, nc] = d + 1
@@ -1569,9 +1759,11 @@ class PlotterEnv(Env):
         distances[self._maze == -1] = -1
         return distances
 
-    def __DT_distance_from_rew__(self, data: np.ndarray) -> list:
+    def __DT_distance_from_rew__(self, data: np.ndarray, restricted: bool, **kwargs) -> list:
         # Prepare to detect rewards
-        win_begin = self._win_begin  # Win begin can be positive or negative integer
+        win_begin = 0
+        if not kwargs.get('all_rew_locs', False):
+            win_begin = self._win_begin  # Win begin can be positive or negative integer
         if win_begin < 0:
             win_begin = self._events['ep'].iloc[-1] + win_begin
         elif win_begin == 0:
@@ -1582,7 +1774,8 @@ class PlotterEnv(Env):
         elif win_end < 0:
             win_end = self._events['ep'].iloc[-1] + win_end
         begin_idx = np.where(self._events['ep'] == win_begin + 1)[0][0]
-        end_idx = np.where(self._events['ep'] == win_end - 1)[0][0]
+        # end_idx = np.where(self._events['ep'] == win_end - 1)[0][0]
+        end_idx = np.where(self._events['ep'] == win_end)[0][0]
 
         # Detecting all rewards in the first and last episodes
         rew =[]
@@ -1592,37 +1785,37 @@ class PlotterEnv(Env):
             [x, y] = [self._events[f'rew{rew_idx}_pos_x'].iloc[begin_idx], self._events[f'rew{rew_idx}_pos_y'].iloc[begin_idx]]
             if not np.isnan(x) and not np.isnan(y) and [x, y] not in rew:
                 rew.append([x, y])
-                distances.append(self.__compute_distances__((x, y)))
+                distances.append(self.__compute_distances__((x, y), restricted))
             [x, y] = [self._events[f'rew{rew_idx}_pos_x'].iloc[end_idx],
                       self._events[f'rew{rew_idx}_pos_y'].iloc[end_idx]]
             if not np.isnan(x) and not np.isnan(y) and [x, y] not in rew:
                 rew.append([x, y])
-                distances.append(self.__compute_distances__((x, y)))
+                distances.append(self.__compute_distances__((x, y), restricted))
             rew_idx += 1
         distances = np.array(distances)
         distances = np.min(distances, axis=0)
 
         return [distances[self._maze >= 0], data[self._maze >= 0]]
 
-    def __DT_distance_from_start__(self, data: np.ndarray) -> list:
+    def __DT_distance_from_start__(self, data: np.ndarray, restricted: bool) -> list:
         # We assume the start point never changes
         [x, y] = [self._events['agent_pos_x'].iloc[0],
                   self._events['agent_pos_y'].iloc[0]]  # Let's assume the agent started from the start position
-        distances = self.__compute_distances__((x, y))
+        distances = self.__compute_distances__((x, y), restricted)
 
         return [distances[self._maze >= 0], data[self._maze >= 0]]
 
-    def __DT_distance_from_branching_point__(self, data: np.ndarray) -> list:
+    def __DT_distance_from_branching_point__(self, data: np.ndarray, restricted: bool) -> list:
         distances = []
         branching_points = [[0, 4], [2, 3], [5, 3]]  # This is manually defined for the maze
         for [x, y] in branching_points:
-            distances.append(self.__compute_distances__((x, y)))
+            distances.append(self.__compute_distances__((x, y), restricted))
         distances = np.array(distances)
         distances = np.min(distances, axis=0)
 
         return [distances[self._maze >= 0], data[self._maze >= 0]]
 
-    def DT_plot_biases(self, to_comp: str, batches: list, save_path: str, **kwargs):
+    def DT_plot_biases(self, to_comp: str, batches: list, save_path: str, restricted: bool, **kwargs):
         """
         The goal of this function is to compare the mean replay between 2 pre-defined regions in the maze
         """
@@ -1632,9 +1825,12 @@ class PlotterEnv(Env):
         if to_comp == 'loc':
             data_type = 'pauses'
             data = self._stopped_at
-        else:
+        elif to_comp == 'content':
             data_type = 'replay steps'
             data = self._replayed
+        elif to_comp == 'stationed':
+            data_type = 'stationed'
+            data = self._stationed
         if self._win_begin is not None or self._win_end is not None:
             beg = self._win_begin
             if self._win_begin < 0:
@@ -1657,25 +1853,45 @@ class PlotterEnv(Env):
         if label != '':
             label = f'_{label}'
 
+        r = 'reward'
+        if kwargs.get('all_rew_locs', False):
+            r = 'rew_locs'
+
+        lin_fit_window = kwargs.get('lin_fit_window', None)
+
         # Here we will do the statistics individually for each and every batch
-        df = pd.DataFrame(columns=['batch', 'reward', 'start', 'branching point', data_type])
+        df = pd.DataFrame(columns=['batch', r, 'start', 'branching point', data_type])
         for batch_idx in range(len(batches)):
             data_batch = data[batches[batch_idx]]
             for ep_idx in range(data_batch.shape[2]):
-                rew_dist = self.__DT_distance_from_rew__(data_batch[:, :, ep_idx])
-                start_dist = self.__DT_distance_from_start__(data_batch[:, :, ep_idx])
-                bp_dist = self.__DT_distance_from_branching_point__(data_batch[:, :, ep_idx])
+                rew_dist = self.__DT_distance_from_rew__(data_batch[:, :, ep_idx], restricted, all_rew_locs=kwargs.get('all_rew_locs', False))
+                start_dist = self.__DT_distance_from_start__(data_batch[:, :, ep_idx], restricted)
+                bp_dist = self.__DT_distance_from_branching_point__(data_batch[:, :, ep_idx], restricted)
                 if not np.all(rew_dist[1] == start_dist[1]) or not np.all(rew_dist[1] == bp_dist[1]):
                     raise RuntimeError('Mismatch between the replay matrices')
-                df_temp = pd.DataFrame({'batch': [batches[batch_idx]]*len(rew_dist[0]), 'reward': rew_dist[0],
+                df_temp = pd.DataFrame({'batch': [batches[batch_idx]]*len(rew_dist[0]), r: rew_dist[0],
                                         'start': start_dist[0],
                                         'branching point': bp_dist[0], data_type: rew_dist[1]})
                 df = (df_temp.copy() if df.empty else pd.concat([df, df_temp], axis=0, ignore_index=True, sort=False))
 
+        if lin_fit_window is not None:
+            df[r] = df[r].where(
+                df[r].between(lin_fit_window[0], lin_fit_window[1]),
+                np.nan
+            )
+            df["start"] = df["start"].where(
+                df["start"].between(lin_fit_window[0], lin_fit_window[1]),
+                np.nan
+            )
+            df["branching point"] = df["branching point"].where(
+                df["branching point"].between(lin_fit_window[0], lin_fit_window[1]),
+                np.nan
+            )
         # Fitting a linear to the differences and plotting it
-        order = ['start', 'reward', 'branching point']
+        order = ['start', r, 'branching point']
         plt.figure()
         df_plot = pd.melt(df, id_vars=['batch', data_type], var_name='from', value_name='distance')
+        df_plot = df_plot.dropna(subset=["distance"])
         viridis = plt.get_cmap('viridis')
         hue_levels = df_plot['batch'].unique()
         colors = [viridis(i) for i in np.linspace(0, 1, len(hue_levels))]
@@ -1700,7 +1916,7 @@ class PlotterEnv(Env):
 
                     ax.text(
                         0.95, 0.85,
-                        f"slope = {slope:.2f}\np = {pval:.2e}",
+                        f"slope = {slope:.4f}\np = {pval:.2e}",
                         transform=ax.transAxes,
                         ha='right',
                         va='bottom',
@@ -1708,7 +1924,9 @@ class PlotterEnv(Env):
                         bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.6)
                     )
         plt.show(block=False)
-        plt.savefig(f'{save_path}distances{label}.pdf', format="pdf", bbox_inches="tight")
+        plt.savefig(f'{save_path}distances{label}.svg', format="svg", bbox_inches="tight")
+
+    plt.close()
 
 
 def plot_cumul_rew_matrix(self, params: list, **kwargs):
@@ -1790,5 +2008,5 @@ def plot_cumul_rew_matrix(self, params: list, **kwargs):
             if not os.path.isdir(path):
                 os.mkdir(path)
             label = kwargs.get('label', '')
-            plt.savefig(f'{path}{method}_cumul_rew_{params[0]}_{params[1]}_{label}.pdf', format="pdf",
+            plt.savefig(f'{path}{method}_cumul_rew_{params[0]}_{params[1]}_{label}.svg', format="svg",
                         bbox_inches="tight")

@@ -1112,3 +1112,65 @@ class SmallEDmaze(Env):
         if self._start_pos is not None:
             self.place_agent(self._start_pos)
         return
+
+
+class TolmanMaze(Env):
+    """
+    A child class to env, where we can specify different mazes, without losing the functions already used in the parent
+    class. The maze and all of its properties will have to be initialized as matrices contained in np arrays
+    Small ED maze is a down scaled version of the ED maze.
+    Proposed reward sites:
+        The agent starts from state 3, each episode is 30 steps long
+        Before reward change
+            - small proximal on 22, distance is 6, value is 0.5 -- rr = 12
+            - large distal on 34, distance is 12, value is 3 -- rr = 54
+        After reward change
+            - large distal on 27, distance is 12 (10 from each old reward), value is 3 -- rr = 54
+    """
+
+    def __init__(self, **kwargs):
+        """
+        Constructor of the double T maze class
+        :param kwargs:  forbidden_walls -- is the agent allowed to choose to bump into the wall
+                        slip_prob       -- the probability of slipping after a step
+                        start_pos       -- the initial position of the agent
+        """
+        # Handling the potential kwargs
+        forbidden_walls = kwargs.get('forbidden_walls', False)
+        slip_prob = kwargs.get('slip_prob', 0)
+
+        # Setting everything up so that we have a double-T maze
+        Env.__init__(self)
+        # The encoding of the possible actions: {0: up, 1: right, 2: down, 3: left}
+        self._act = np.array(
+            [np.array([0, 0]), np.array([-1, 0]), np.array([0, 1]), np.array([1, 0]), np.array([0, -1])])
+        # The maze itself
+        self._maze = np.array([[-1, -1, 0, -1, -1, -1],
+                               [-1, -1, 1, 2, 3, 4],
+                               [-1, -1, 5, -1, -1, 6],
+                               [7, 8, 9, -1, -1, 10],
+                               [11, -1, 12, -1, -1, 13],
+                               [14, 15, 16, 17, 18, 19],
+                               [-1, -1, 20, -1, -1, -1]])
+        # Transitions
+        self._slip_prob = slip_prob
+        # Where is the reward
+        self._reward = np.zeros(self._maze.shape)
+        # What is the likelihood of getting a reward
+        self._reward_prob = np.zeros(self._maze.shape)
+        # Where do we usually start from
+        self._agent_pos = np.zeros(self._maze.shape)
+        # Are there any forbidden actions (following the coding of _act)
+        self._restrict = np.zeros((self._maze.shape[0], self._maze.shape[1], len(self._act)))
+        # Are the walls restricted
+        self._forbidden_walls = forbidden_walls
+        if forbidden_walls:
+            self.__restrict_walls__()
+        # Walls to insert
+        self._walls = np.zeros((self._maze.shape[0], self._maze.shape[1], len(self._act)))
+
+        # Further options
+        self._start_pos = kwargs.get('start_pos', None)
+        if self._start_pos is not None:
+            self.place_agent(self._start_pos)
+        return

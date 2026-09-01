@@ -56,19 +56,17 @@ class RLagent:
                 epsilon: for epsilon-greedy decisions (non-optional) [float]
                 known_env: is the number of states previously known [True] or not [False, default]
             Regarding the replay:
-                replay_type: "forward", "backward", "priority", "trsam", "bidir" (optional) [str]
+                replay_type: "forward", "backward", "priority", "trsam" or "itrsam" (optional) [str]
                     event_handle: what should we compare a new event to when trying to estimate if we need to
                         overwrite an old memory or not: states ['s'], state-action ['sa'] or
-                        state-action-new state ['sas']. Only needed if replay_type is "priority" or "bidir"
+                        state-action-new state ['sas']. Only needed if replay_type is "priority"
                     event_content: what should we replay, states ['s'], state-action ['sa'],
                         state-action-new state ['sas'], or state-action-new state-reward ['sasr', default].
                     replay_thresh: the replay threshold (minimum NORMALIZED error, optional) [float]
                     max_replay: the number of replay steps we'll take (optional) [int]
-                    add_predecessors: if replay type is "priority" or "bidir", should I perform a predecessor search
+                    add_predecessors: if replay type is "priority", should I perform a predecessor search
                         when I add an element to the memory buffer ["act": after a real action, "rep": after a replay
                         step, "both": after both] (optional)
-                    forbidden_walls: if replay_type is trsam or bidir; or if event_content is 's' (the action needs to
-                        be selected) - is bumping into a wall forbidden during simulation [True, default] or not [False]
             Regarding the epistemic values:
                 epist_rew_type: "diff" if I want to be attracted to change in information and "abs" if absolute
                     information content should attract the agent. "diff" is default
@@ -132,11 +130,13 @@ class RLagent:
 
         # On the replay
         self._replay_type = kwargs.get("replay_type", None)
-        if self._replay_type not in [None, "forward", "backward", "priority", "trsam", "bidir"]:
+        if self._replay_type not in [None, "forward", "backward", "priority", "trsam", "itrsam"]:
             raise ValueError(f"Replay type {self._replay_type} is not a valid value.")
         if self._replay_type is not None:
             # Should I consider an event to be described by a state-action couple (True), or only by the state (False)
             self._event_content = kwargs.get("event_content", 'sasr')
+            if self._replay_type in ["trsam", "itrsam"]:
+                self._event_content = 'sasr'
             self._replay_thresh = kwargs.get("replay_thresh", 0)
             if self._replay_thresh < 0:
                 raise ValueError('Replay threshold needs to be non-negative.')
@@ -149,19 +149,13 @@ class RLagent:
             self._add_predecessors = None  # Only updated in MB agent
             # Memory: state (s), action (u), new state (s_prime), reward (r), surprise (delta)
             # formatted like a table, the first element is the one replayed
-            # we need it except for trsam which will generate its own states to replay
-            if self._replay_type != "trsam":
-                # We need a replay buffer in the shape of [s, a, s', r, hr, ht, deltaC]
-                if self._max_replay is not None:
-                    if self._replay_type != 'bidir':
-                        self._memory_buff = np.zeros((self._max_replay, 7), dtype=float)
-                    else:
-                        self._memory_buff = np.zeros((math.floor(self._max_replay / 2), 7), dtype=float)
-                    # Don't store more than what we can truly replay
-                else:
-                    self._memory_buff = np.zeros((0, 7), dtype=float)
-                    # This one can be extended infinitely
-            if self._replay_type in ["priority", "bidir"]:
+            # We need a replay buffer in the shape of [s, a, s', r, hr, ht, deltaC]
+            if self._max_replay is not None:
+                self._memory_buff = np.zeros((self._max_replay, 7), dtype=float)
+            else:
+                self._memory_buff = np.zeros((0, 7), dtype=float)
+                # This one can be extended infinitely
+            if self._replay_type in ["priority"]:
                 self._event_handle = kwargs.get("event_handle", None)
                 if self._event_handle is None:
                     raise ValueError("If we use prioritized replay, event_handle need sto be defined.")
@@ -170,7 +164,6 @@ class RLagent:
                 self._add_predecessors = kwargs.get("add_predecessors", None)
                 if self._add_predecessors not in [None, "act", "rep", "both"]:
                     raise ValueError("Predecessors can be added after action 'act', replay 'rep', or both 'both'.")
-            self._forbidden_walls = kwargs.get('forbidden_walls', True)
 
         # For the epistemic rewards
         self._epist_rew_type = kwargs.get('epist_rew_type', 'diff')  # Diff means I can ignore inherent uncertainty
@@ -247,8 +240,8 @@ class RLagent:
         A function that pops (and consequently deletes) the top enry in the memory buffer.
         :return: The stored event
         """
-        if self._replay_type not in ['priority', 'bidir']:
-            raise RuntimeWarning('Popping from the memory is only recommended when the memory is prioritized.')
+        if self._replay_type not in ['priority', 'trsam', 'itrsam']:
+            raise RuntimeWarning('Popping from the memory is not recommended for forward/backward replay.')
 
         # First we take the stored event
         event = np.copy(self._memory_buff[0, :])
@@ -286,12 +279,9 @@ class RLagent:
         """
         estimate = kwargs.get('estimate', False)  # Is the deltaC an estimate or a real result
 
-        if self._replay_type == "trsam":
-            return  # No need to store anything
-
-        # 1) Sub-threshold elements will be deleted for pr/bidir
+        # 1) Sub-threshold elements will be deleted for pr
         to_delete = False
-        if abs(deltaC) <= self._replay_thresh and self._replay_type in ['priority', 'bidir']:
+        if abs(deltaC) <= self._replay_thresh and self._replay_type in ['priority']:
             # TODO we might want to change it so that only the significant elements are stored for fd/bd too
             # If the element is lower than the threshold, there is no reason to store it, however, what if a copy of it
             # is already present in the memory buffer?
@@ -308,7 +298,7 @@ class RLagent:
 
         # 2) Now we need to see if the new element will overwrite an old copy or be added to the buffer
         memory_idx = None
-        if self._replay_type in ['priority', 'bidir']:
+        if self._replay_type in ['priority']:
             if self._event_handle == 'sas' and np.any(
                     np.logical_and(np.logical_and(self._memory_buff[:, 0] == s, self._memory_buff[:, 1] == a),
                                    self._memory_buff[:, 2] == s_prime)):
@@ -321,16 +311,16 @@ class RLagent:
             elif self._event_handle == 's' and np.any(self._memory_buff[:, 0] == s):
                 memory_idx = np.where(self._memory_buff[:, 0] == s)[0]
 
-        # TODO I allow for fd/bd to store an element twice, and only forbid it for pr/bidir in the next line. Is that OK
-        if self._replay_type in ['priority', 'bidir'] and memory_idx is not None and memory_idx.size != 0:
-            # 2.a) It is pr/bidir, and we found a copy, so we'll have to REPLACE it. This will mean that we'll first
+        # TODO I allow for fd/bd to store an element twice, and only forbid it for pr in the next line. Is that OK
+        if self._replay_type in ['priority'] and memory_idx is not None and memory_idx.size != 0:
+            # 2.a) It is pr, and we found a copy, so we'll have to REPLACE it. This will mean that we'll first
             # remove the old copy, and then add the new one just like normal
 
             # 2.a.1) First question: is the original copy better, or do I want to overwrite?
             if estimate and abs(self._memory_buff[memory_idx[0], -1] > abs(deltaC)):
                 # If the original copy is better, and the current version is an estimate (we don't trust it), we keep
                 # the OG
-                # TODO maybe we want to overwrite the pre-existing copy for pr/bidir, even if the new is worse?I think
+                # TODO maybe we want to overwrite the pre-existing copy for pr, even if the new is worse?I think
                 #  not, because that could mean we might want to even delete the entry, which is a problem; plus we
                 #  might end up decreasing the importance of a state cuz we took an insignificant action
                 return
@@ -350,7 +340,7 @@ class RLagent:
                 empty_idx = np.array([self._memory_buff.shape[0] - 1])
 
         else:
-            # 2.b) It's either pr/bidir and no pre-existing copy was found in the buffer, or it is not prioritized --
+            # 2.b) It's pr and no pre-existing copy was found in the buffer, or it is not prioritized --
             # this means we have to ADD the new element to the buffer no matter what
             if empty_idx.size == 0 and self._max_replay is None and not to_delete:
                 # 2.b.1) If full but infinite (and we want to store it), we expand. Otherwise, nothing will happen
@@ -358,7 +348,7 @@ class RLagent:
                 empty_idx = np.array([self._memory_buff.shape[0] - 1])
 
         if to_delete:
-            # I either deleted a copy (pr/bidir) or have found none. For an insignificant memory, it is time to return
+            # I either deleted a copy (pr) or have found none. For an insignificant memory, it is time to return
             if self._max_replay is None and memory_idx is not None and memory_idx.size != 0:
                 # If there was a copy before -- in an infinite memory -- that we removed, then there is an empty row at
                 # the bottom to get rid of
@@ -366,11 +356,11 @@ class RLagent:
             return
 
         # 3) Now all we have to do is insert the new element at its proper place
-        if self._replay_type in ["backward", "priority", "bidir"]:
+        if self._replay_type in ["backward", "priority", "itrsam"]:
             # 3.a) These algorithms prefer to insert more significant elements towards the top of the buffer
             insertion_idx = 0  # backwards -- put it on the front
-            if self._replay_type in ["priority", "bidir"]:
-                # Pr and bidir want to find the location based on priority
+            if self._replay_type in ["priority"]:
+                # Pr wants to find the location based on priority
                 insertion_idx = np.where(abs(self._memory_buff[:, -1]) < abs(deltaC))[0]
                 if insertion_idx.size == 0:  # if full and all the stored elements are more important
                     return
@@ -381,7 +371,7 @@ class RLagent:
             self._memory_buff[insertion_idx:, :] = np.roll(self._memory_buff[insertion_idx:, :], 1, axis=0)
             self._memory_buff[insertion_idx, :] = to_store
             return
-        elif self._replay_type == "forward":
+        elif self._replay_type in ["forward", "trsam"]:
             # 3.b) These algorithms prefer to insert more significant elements towards the end of the buffer
             insertion_idx = empty_idx  # IDX of first empty row
             if insertion_idx.size == 0:
@@ -441,7 +431,8 @@ class RLagent:
         :return: prediction error
         """
         C_curr = self.__C_vector__(s=s, a=a, replay=True)
-        C_max = np.nanmax(self._C, axis=1)  # This way impossible actions (with U-value initialized to max) won't affect it
+        C_max = np.nanmax(self._C,
+                          axis=1)  # This way impossible actions (with U-value initialized to max) won't affect it
         TD_error = rew + self._gamma * C_max[s_prime] - self._C[s, a, :]
         self._C[s, a, :] += self._alpha * TD_error
         # The maximum will be updated here, meaning that C-values are always normalized based on the current max
@@ -496,14 +487,14 @@ class RLagent:
         # return self._Q[s, u] - Q_old, V[0]
 
     # Hidden methods for MB replay
-    def __isrewarded__(self, s: int) -> bool:
-        """
-        Returns whether a given state is rewarded or not (assuming that every real state transition is more
-        probable than 1/nS)
-        :param s: The state in question
-        :return: Rewarded [True] or not [False]
-        """
-        return np.any(self._Rhist[s, :, :] > 0)
+    # def __isrewarded__(self, s: int) -> bool:
+    #     """
+    #     Returns whether a given state is rewarded or not (assuming that every real state transition is more
+    #     probable than 1/nS)
+    #     :param s: The state in question
+    #     :return: Rewarded [True] or not [False]
+    #     """
+    #     return np.any(self._Rhist[s, :, :] > 0)
 
     def __find_predecessors__(self, s: int, p: float) -> None:
         """
@@ -538,38 +529,33 @@ class RLagent:
         Finds the desired (or at least possible) actions from a given state based on the model.
         :param s: The current state
         :param kwargs:
-            prev_s: state we don't want to visit if possible
+            forbidden_s: states we don't want to visit
         :return: an array of the possible actions
         """
-        prev_s = kwargs.get('prev_s', None)
+        forbidden_s = kwargs.get('forbidden_s', np.array([]))
+        if forbidden_s is not None and (type(forbidden_s) != list or type(forbidden_s) != np.ndarray):
+            forbidden_s = np.array([forbidden_s])
 
         # 1) We start with all possible actions based on the model
         actions_to_choose = np.array(range(self._nA))
-        mask = [not np.isnan(self._C[s, a, 0]) for a in range(self._nA)]
+        # mask = [not np.isnan(self._C[s, a, 0]) for a in range(self._nA)]  # If NaN represents an unknown C-value
+        mask = np.sum(self._Thist[s, :, :, :], axis=(1, 2)) > 0  # All actions that have been taken at least once
         actions_to_choose = actions_to_choose[mask]
 
-        # 2) If a prev s is specified, it means that we should not backtrack. So first off, remove all actions that
-        # would do that. By this I specifically mean that actions that are MOST LIKELY taking us back
-        stay_in_place = True  # Given all our actions, will the agent stay in place or will it move
-        if prev_s is not None:
-            actions_no_backtrack = np.copy(actions_to_choose)
-            if prev_s is not None:
-                for a in actions_no_backtrack:
-                    if np.nanargmax(self._T[s, a, :]) == prev_s:
-                        actions_no_backtrack = actions_no_backtrack[actions_no_backtrack != a]
-                    elif np.nanargmax(self._T[s, a, :]) != s:
-                        stay_in_place = False
+        # 2) If forbidden_s are specified, it means that we should not step onto these states. So first off,
+        # remove all actions that would do that.
+        # By this I specifically mean that actions that are MOST LIKELY taking us back
+        if forbidden_s.size != 0:
+            actions_legal = np.copy(actions_to_choose)
+            for a in actions_legal:
+                if np.nanargmax(self._T[s, a, :]) in forbidden_s:
+                    actions_legal = actions_legal[actions_legal != a]
 
-            # 3) Finally, if what we are left with are all actions that keep the agent in place, that means we are in a
-            # dead end, so backtracking should still be possible. In this case we ignore the "no backtracking" rule.
-            # Similarly, if we have no actions left, we also ignore the no backtracking rule
-            if actions_no_backtrack.size != 0 and not stay_in_place:
-                actions_to_choose = actions_no_backtrack
+            actions_to_choose = actions_legal
 
         return actions_to_choose
 
-    def __trajectory_sampling__(self, s: int, **kwargs) -> None:
-        # TODO needs complete reworking in the episodic scenario
+    def __generate_trajectory__(self, s: int, **kwargs) -> None:
         """
         This function performs basic trajectory sampling
         :param s: state we start the simulation from
@@ -579,49 +565,46 @@ class RLagent:
         :return:
         """
         # stop_loc = kwargs.get('stop_loc', np.array([]))
-        # steps = kwargs.get('steps', self._max_replay)
-        #
-        # # 1) We start from the agent's position
-        # curr_s = s  # current state
-        # prev_s = s  # previous state
-        # rew = np.zeros((1, 3))
-        # max_delta = 0
-        # it = 0
-        # while steps is None or it < steps:
-        #     # 2.a) finding the possible actions
-        #     actions_to_choose = self.__find_good_actions__(
-        #         curr_s)  # , prev_s=prev_s) # TODO decide if we are allowed to backtrack
-        #
-        #     if len(actions_to_choose) > 0:
-        #         # 2.b) committing to a choice
-        #         a = self.choose_action(curr_s, actions_to_choose, virtual=True)
-        #         # If we need to combine delta, we choose action based on epist values, otherwise not (done in
-        #         # choose_action)
-        #         s_prime = np.random.choice(list(range(self._nS)), p=self._T[curr_s, a, :])
-        #
-        #         # 3) And we get a reward
-        #         rew = self._R[curr_s, a, :]
-        #
-        #         # 4) We learn
-        #         delta_C = self.inference(curr_s, a, s_prime, rew, virtual=True, update_buffer=False)
-        #         # We don't update the buffer, as the path we're taking is completely imaginary
-        #
-        #         # 5) And we consider one step to be done
-        #         it += 1
-        #
-        #         # 6) Handle delta and if this state is rewarded (and delta is significant), we go back to start
-        #         if abs(delta_C) > abs(max_delta):
-        #             max_delta = delta_C
-        #         if curr_s != s_prime:  # If we stay in place, let's not update anything
-        #             prev_s = curr_s
-        #             curr_s = s_prime
-        #     if len(actions_to_choose) == 0 or curr_s in stop_loc or self.__isrewarded__(
-        #             curr_s):  # TODO is this correct?
-        #         if abs(max_delta) > self._replay_thresh:
-        #             curr_s = s
-        #             max_delta = 0
-        #         else:
-        #             break
+        # stop_loc = np.append(stop_loc, s)
+        steps = kwargs.get('steps', self._max_replay)
+
+        # 1) We start from the agent's position
+        curr_s = s  # current state
+        prev_s = np.array([s])  # previous states; it makes no sense to remain in the starting state
+        rew = np.zeros((1, 3))
+        it = 0
+        while steps is None or it < steps:
+            # print(f'\t\t\tIt {it}/{steps}; from state {curr_s}:\n')  #####
+            # 2.a) finding the possible actions
+            actions_to_choose = self.__find_good_actions__(curr_s, forbidden_s=prev_s)  # At the first step staying in place is forbidden
+            # print(f'\t\t\t\tActions to choose: {actions_to_choose}\n')  #####
+
+            if len(actions_to_choose) > 0:
+                # 2.b) committing to a choice
+                a = self.choose_action(curr_s, actions_to_choose, virtual=True)
+                # If we need to combine delta, we choose action based on epist values, otherwise not (done in
+                # choose_action)
+                s_prime = np.random.choice(list(range(self._nS)), p=self._T[curr_s, a, :])
+
+                # 3) And we get a reward
+                rew = self._R[curr_s, a, :]
+
+                # 4) We store the step in the buffer
+                # print(f"\t\t\t\tStore (s={curr_s}, a={a}, s'={s_prime}, r={rew})\n")  #####
+                self.__store_in_memory__(curr_s, a, s_prime, rew, 0)
+
+                # 5) And we consider one step to be done
+                it += 1
+
+                # 6) Conclude the loop
+                # Basically we can choose to stay in a given state at most once.
+                prev_s = np.append(prev_s, curr_s) if curr_s not in prev_s else prev_s
+                curr_s = s_prime
+                # print(f"\t\t\t\tForbidden states: prev_s = {prev_s}\n")  #####
+            if len(actions_to_choose) == 0 or rew[0] > 0:
+                # If moving is impossible
+                # If we're rewarded
+                break
 
     # Hidden method concerning the saving
     def __save_step__(self, virtual: bool, **kwargs) -> None:
@@ -789,8 +772,9 @@ class RLagent:
         self._Rhist[s, a, :] = curr_Rhist  # We need this because roll creates a copy instead of a reference
 
         r = np.sum(self._Rhist[s, a, :]) / self._nV
-        alpha = np.sum(curr_Rhist[0:curr_V + 1] != 0) ##########################+ 1
-        beta = np.sum(curr_Rhist[0:curr_V + 1] == 0) ##########################+ 1  # The bias is apparently omnipresent
+        alpha = np.sum(curr_Rhist[0:curr_V + 1] != 0)  # + 1  # BIAS
+        beta = np.sum(
+            curr_Rhist[0:curr_V + 1] == 0) # + 1  # The BIAS is apparently omnipresent
         # if curr_V < self._nV-1:
         #     # If Rhist is not full *after* adding the new element (i.e. if the curr_V idx is less than max), we add one
         #     alpha += 1
@@ -813,15 +797,14 @@ class RLagent:
         :param s_prime: arriving state label
         :param rew: reward values [r, hr, ht]
         :param kwargs:
-            update_buffer: should I store this item in the memory buffer [True, default] or not [False] -- during
-                forward and backward replay or trsam we don't want to update the memory buffer
             virtual: is this a virtual step [True] or a real one [False, default] -- will decide if we'll learn epist
                 values from it, and *in case we update the buffer*, do we add predecessors to it
         :return: the (combined) delta Q
         """
         # Let's see what situation we're in (real step or virtual, do we update the buffer or not)
-        update_buffer = kwargs.get('update_buffer', True)
         virtual = kwargs.get('virtual', False)
+        update_buffer = True if ((not virtual and self._replay_type in ["priority", "forward", "backward"])  # Real and needs memories
+                                 or self._replay_type in ["priority"]) else False  # Or memories are updated on the fly during replay
 
         if not virtual:  # If s comes from the environment
             try:
@@ -844,7 +827,7 @@ class RLagent:
         # 4) Store if needed
         if update_buffer:
             self.__store_in_memory__(s, a, s_prime, rew, delta_C)
-            if self._replay_type in ['priority', 'bidir'] and \
+            if self._replay_type in ['priority'] and \
                     ((not virtual and self._add_predecessors in ['act', 'both']) or
                      (virtual and self._add_predecessors in ['rep', 'both'])):
                 self.__find_predecessors__(s, abs(delta_C))
@@ -860,43 +843,33 @@ class RLagent:
             s: the label of the starting state, in case the replay is trajectory sampling [int]
         :return:
         """
-
+        # print('Commencing replay...\n') ################
         # 0) This function uses stored memories to replay. For simulating experience, we need to call trsam
-        update_buffer = False  # We will most likely not update the memory buffer during replay
-        max_replay = self._max_replay
-        if self._replay_type == 'trsam':
-            s = kwargs.get('s', None)
-            if s is None:
+        max_replay = self._max_replay  # How many steps I can still actually replay?
+        s_start = kwargs.get('s', None)
+        if self._replay_type in ['trsam', 'itrsam']:
+            if s_start is None:
                 raise ValueError('Trajectory sampling needs a starting state specified.')
-            s = self.__translate_s__(s)  # As s comes from the outside
-            self.__trajectory_sampling__(s)
-            return
-        elif self._replay_type in ['priority', 'bidir']:
-            # TODO I think for bidir we should launch it not when we see a significant change, but precisely when we
-            #  don't. When we do see a significant change, the prioritized sweeping will take care of it, leaving
-            #  nothing for the trsam.
-            # For bidir and priority it is essential to always update the buffer, as priorities change during replay
-            update_buffer = True
-            if self._replay_type == 'bidir' and max_replay is not None:
-                # TODO should we keep this "half the replay is pr, the other half is trsam", or should we go pr until
-                #  the buffer is empty?
-                max_replay = math.floor(self._max_replay / 2)
+            s_start = self.__translate_s__(s_start)  # As s comes from the outside
+            # print(f'\tGenerating 1st trajectory from s={s_start}\n')  #########
+            self.__generate_trajectory__(s_start, steps=max_replay)
+            # print(f'\tTrajectory of length {self._memory_buff.shape[0]} generated\n') #########
 
         delta = 0  # the biggest change encountered over the course of the last swipe (fd, bd)
         it = 0  # how many iterations of memory replay have e performed so far
-        buffer_idx = 0  # which memory are we replaying (for priority and bidir it's always 0)
-        stop_loc = np.array([])  # for bidirectional, we might want to collect the states in which we need to stop
+        buffer_idx = 0  # which memory are we replaying (for priority and trsam/itrsam it's always 0)
 
         # 1.1) Iterate while we can
-        while self._memory_buff.size > 0 and (self._max_replay is None or it < max_replay):
-            event = np.copy(self._memory_buff[buffer_idx])  # buffer_idx == 0 for priority and bidir
+        while self._memory_buff.size > 0 and (self._max_replay is None or it < self._max_replay):
+            # print(f"\tIteration {it}/{self._max_replay}:")  ###########
+            event = np.copy(self._memory_buff[buffer_idx])  # buffer_idx == 0 for priority
             # 1.2) We break out of the loop if nothing significant is produced. The criterion differs between the
             # different replay methods.
-            if self._replay_type in ["priority", "bidir"]:
-                # 1.2.a) If priority/bidir, we'll check significance: if we're still significant (delta > threshold) we
+            if self._replay_type in ["priority", "trsam", "itrsam"]:
+                # 1.2.a) If priority, we'll check significance: if we're still significant (delta > threshold) we
                 # take the first element, and perform the update on it. If it's an empty event, that means the buffer
                 # is empty, and the replay is over
-                if np.all(event == 0):
+                if np.all(event == 0):  # Impossible for trsam and itrsam
                     break
                 self.__pop_memory__()  # Remove the event that we'll replay
             elif self._replay_type in ["forward", "backward"]:
@@ -926,7 +899,7 @@ class RLagent:
                 # action to choose. In this case we need to move to the next element in the memory
                 # This scenario is impossible if we allow bumping into walls
                 if len(a_poss) == 0:
-                    if self._replay_type in ['forward', 'backward']:
+                    if self._replay_type in ['forward', 'backward']:  # Cannot be trsam or itrsam
                         it += 1
                     continue
                 a = self.choose_action(s, a_poss, virtual=True)
@@ -938,34 +911,29 @@ class RLagent:
                 rew = event[3:6]
             else:
                 rew = self._R[int(event[0]), int(event[1]), :].squeeze()
-            delta_curr = self.inference(s=s, a=a, s_prime=s_prime, rew=rew,
-                                        virtual=True, update_buffer=update_buffer)
+            # print(f"\t\tTreating event [s={s}, a={a}, s'={s_prime}, r={rew}]") ####
+            delta_curr = self.inference(s=s, a=a, s_prime=s_prime, rew=rew, virtual=True)
             it += 1  # This is where I count the iterations, as I wanna know the number of actual inferences
 
-            # 1.4) Conclude by some final step
-            if self._replay_type in ["priority", "bidir"]:
-                if self._replay_type == 'bidir':
-                    # We store the replayed state as a bidir stopping criterion
-                    # (we only store s, not s_prime, as technically a decision from s_prime has not yet been replayed)
-                    stop_loc = np.append(stop_loc, np.array([int(event[0])]), axis=0)
-            elif self._replay_type in ["forward", "backward"]:
+            # 1.4) Calculate the max delta for methods that need it...
+            if self._replay_type in ["forward", "backward", "trsam", "itrsam"]:
+                # print(f"\t\tDelta C={delta}") ####
                 if abs(delta_curr) > abs(delta):
                     delta = delta_curr
+            # ... then refill the buffer if it needs refilling...
+            if self._replay_type in ["trsam", "itrsam"] and self._memory_buff.size == 0 and abs(delta) > self._replay_thresh:
+                if max_replay is not None:
+                    max_replay = self._max_replay - it
+                # print(f'\tGenerating trajectory from s={s_start}\n')  #########
+                self.__generate_trajectory__(s_start, steps=max_replay)
+                # print(f'\tTrajectory of length {self._memory_buff.shape[0]} generated/n')  #########
+                delta = 0
+            # ... and take a step with the index for methods that need that
+            if self._replay_type in ["forward", "backward"]:
                 buffer_idx += 1
                 if buffer_idx >= self._memory_buff.shape[0]:
                     # No need to take care of arriving at an empty row, that's handled in 1.2.b)
                     buffer_idx = 0
-
-        # 2) If bidir, let's run some simulations using the remaining steps
-        if self._replay_type == 'bidir':
-            s = kwargs.get('s', None)
-            if s is None:
-                raise ValueError('Bidirectional search needs a starting state specified.')
-            s = self.__translate_s__(s)  # As s comes from the outside
-            steps = self._max_replay
-            if steps is not None:
-                steps -= it
-            self.__trajectory_sampling__(s, stop_loc=np.unique(stop_loc), steps=steps)
         return
 
     # All about saving
@@ -995,13 +963,18 @@ class RLagent:
                             except AttributeError:
                                 s = s_idx
                             if f'Q_{s}_{a_idx}' not in self._events:
-                                self._events[f'Q_{s}_{a_idx}'] = [np.nan] * (len(self._events[f'Q_{self._states[0]}_0']))
-                                self._events[f'Ur_{s}_{a_idx}'] = [np.nan] * (len(self._events[f'Q_{self._states[0]}_0']))
-                                self._events[f'Ut_{s}_{a_idx}'] = [np.nan] * (len(self._events[f'Q_{self._states[0]}_0']))
-                                self._events[f'C_{s}_{a_idx}'] = [np.nan] * (len(self._events[f'Q_{self._states[0]}_0']))
+                                self._events[f'Q_{s}_{a_idx}'] = [np.nan] * (
+                                    len(self._events[f'Q_{self._states[0]}_0']))
+                                self._events[f'Ur_{s}_{a_idx}'] = [np.nan] * (
+                                    len(self._events[f'Q_{self._states[0]}_0']))
+                                self._events[f'Ut_{s}_{a_idx}'] = [np.nan] * (
+                                    len(self._events[f'Q_{self._states[0]}_0']))
+                                self._events[f'C_{s}_{a_idx}'] = [np.nan] * (
+                                    len(self._events[f'Q_{self._states[0]}_0']))
 
             else:
-                self._events = {'iter': [], 'step': [], 's': [], 'a': [], 's_prime': [], 'r': [], 'hr': [], 'ht': [], 'deltaC': []}
+                self._events = {'iter': [], 'step': [], 's': [], 'a': [], 's_prime': [], 'r': [], 'hr': [], 'ht': [],
+                                'deltaC': []}
                 if self._format == 'small':
                     self._events[f'Ur'] = []
                     self._events[f'Ut'] = []
